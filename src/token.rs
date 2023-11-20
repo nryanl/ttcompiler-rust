@@ -42,7 +42,7 @@ impl PartialEq for TokenType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Token {
     pub text: String,
     pub kind: TokenType,
@@ -70,5 +70,14 @@ impl Token {
         }
 
 
+    }
+}
+
+impl Default for Token {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            kind: TokenType::Unknown,
+        }
     }
 }
