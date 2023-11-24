@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 
-use crate::{lexer::Lexer, token::{TokenType, Token}};
+use crate::{lexer::Lexer, token::{TokenType, Token}, emitter::Emitter};
 
 
-pub struct Parser {
+pub struct Parser<'a> {
     lexer: Lexer,
+    emitter: &'a mut Emitter,
     cur_token: Token,
     peek_token: Token,
     symbols: HashSet<String>,
@@ -12,10 +13,11 @@ pub struct Parser {
     labels_gotoed: HashSet<String>,
 }
 
-impl Parser {
-    pub fn new(lexer: Lexer) -> Self {
+impl<'a> Parser<'a> {
+    pub fn new(lexer: Lexer, emitter: &'a mut Emitter) -> Self {
         let mut s = Self {
             lexer,
+            emitter,
             cur_token: Token::default(),
             peek_token: Token::default(),
             symbols: HashSet::new(),
@@ -66,8 +68,6 @@ impl Parser {
 
     /// nl ::= '\n'+
     pub fn nl(&mut self) {
-        println!("NEWLINE");
-
         // Require at least one newline.
         self.match_token(TokenType::Newline);
 
@@ -79,7 +79,8 @@ impl Parser {
 
     /// program ::= {statement}
     pub fn program(&mut self) {
-        println!("PROGRAM");
+        self.emitter.header_line("#include <stdio.h>");
+        self.emitter.header_line("int main(void){");
 
         // Since some newlines are required in our grammar, need to skip the excess.
         while self.check_token(TokenType::Newline) {
@@ -90,6 +91,10 @@ impl Parser {
         while !self.check_token(TokenType::Eof) {
             self.statement();
         }
+
+        // Wrap things up.
+        self.emitter.emit_line("return 0;");
+        self.emitter.emit_line("}");
 
         // Check that each label referenced in a GOTO is declared
         self.labels_gotoed.iter()
@@ -105,24 +110,27 @@ impl Parser {
 
         match self.cur_token.kind {
             TokenType::Print => {
-                println!("STATEMENT-PRINT");
                 self.next_token();
 
                 if self.check_token(TokenType::String) {
-                    // Simple string.
+                    // Simple string, so print it.
+                    self.emitter.emit_line(format!("printf(\"{}\\n\");", self.cur_token.text).as_str());
                     self.next_token();
                 } else {
                     // Expect an expression
+                    self.emitter.emit("printf(\"%.2f\\n\", (float)(");
                     self.expression();
+                    self.emitter.emit_line("));");
                 }
             },
             TokenType::If => {
-                println!("STATEMENT-IF");
                 self.next_token();
+                self.emitter.emit("if(");
                 self.comparison();
 
                 self.match_token(TokenType::Then);
                 self.nl();
+                self.emitter.emit_line("){");
 
                 // Zero of more statements in the body
                 while !self.check_token(TokenType::EndIf) {
@@ -130,14 +138,16 @@ impl Parser {
                 }
                 
                 self.match_token(TokenType::EndIf);
+                self.emitter.emit_line("}");
             },
             TokenType::While => {
-                println!("STATEMENT-WHILE");
                 self.next_token();
+                self.emitter.emit("while(");
                 self.comparison();
 
                 self.match_token(TokenType::Repeat);
                 self.nl();
+                self.emitter.emit_line("){");
 
                 // Zero or more statements in the loop body.
                 while !self.check_token(TokenType::EndWhile) {
@@ -145,47 +155,56 @@ impl Parser {
                 }
 
                 self.match_token(TokenType::EndWhile);
+                self.emitter.emit_line("}");
             },
             TokenType::Label => {
-                println!("STATEMENT-LABEL");
                 self.next_token();
+
                 if self.labels_declared.contains(&self.cur_token.text) {
                     self.abort(format!("Label already exists: {}", self.cur_token.text).as_str());
                 }
                 self.labels_declared.insert(self.cur_token.text.clone());
 
+                self.emitter.emit_line(format!("{}:", self.cur_token.text).as_str());
                 self.match_token(TokenType::Ident);
             },
             TokenType::GoTo => {
-                println!("STATEMENT-GOTO");
                 self.next_token();
                 self.labels_gotoed.insert(self.cur_token.text.clone());
+                self.emitter.emit_line(format!("goto {};", self.cur_token.text).as_str());
                 self.match_token(TokenType::Ident);
             },
             TokenType::Let => {
-                println!("STATEMENT-LET");
                 self.next_token();
 
                 // Check if ident exists in symbol table. If not, declare it.
                 if !self.symbols.contains(&self.cur_token.text) {
                     self.symbols.insert(self.cur_token.text.clone());
+                    self.emitter.header_line(format!("float {};", self.cur_token.text).as_str());
                 }
 
+                self.emitter.emit(format!("{} = ", self.cur_token.text).as_str());
                 self.match_token(TokenType::Ident);
                 self.match_token(TokenType::Eq);
 
                 self.expression();
+                self.emitter.emit_line(";");
             },
             TokenType::Input => {
-                println!("STATEMENT-INPUT");
-
                 self.next_token();
 
                 // If variable doesn't already exist, declare it.
                 if !self.symbols.contains(&self.cur_token.text) {
                     self.symbols.insert(self.cur_token.text.clone());
+                    self.emitter.header_line(format!("float {};", self.cur_token.text).as_str());
                 }
 
+                // Emit scanf but also validate the input. If invalid, set the variable to 0 and clear the input.
+                self.emitter.emit_line(format!("if(0 == scanf(\"%f\", &{})) {{", self.cur_token.text).as_str());
+                self.emitter.emit_line(format!("{} = 0;", self.cur_token.text).as_str());
+                self.emitter.emit("scanf(\"%");
+                self.emitter.emit_line("*s\");");
+                self.emitter.emit_line("}");
                 self.match_token(TokenType::Ident);
             },
             _ => {
@@ -197,46 +216,46 @@ impl Parser {
     }
 
     pub fn expression(&mut self) {
-        println!("EXPRESSION");
-
         self.term();
         // Can have 0 or more +/- and expressions
         while self.check_token(TokenType::Plus) || self.check_token(TokenType::Minus) {
+            self.emitter.emit(&self.cur_token.text);
             self.next_token();
             self.term();
         }
     }
 
     pub fn term(&mut self) {
-        println!("TERM");
-
         self.unary();
         // Can have 0 or more *// and expressions.
         while self.check_token(TokenType::Asterisk) || self.check_token(TokenType::Slash) {
+            self.emitter.emit(&self.cur_token.text);
             self.next_token();
             self.unary();
         }
     }
 
     pub fn unary(&mut self) {
-        println!("UNARY");
-
         // Optional unary +/-
         if self.check_token(TokenType::Plus) || self.check_token(TokenType::Minus) {
+            self.emitter.emit(&self.cur_token.text);
             self.next_token();
         }
         self.primary();
     }
 
     pub fn primary(&mut self) {
-        println!("PRIMARY ({})", self.cur_token.text);
-
         match self.cur_token.kind {
-            TokenType::Number => self.next_token(),
+            TokenType::Number => {
+                self.emitter.emit(&self.cur_token.text);
+                self.next_token();
+            },
             TokenType::Ident => {
                 if !self.symbols.contains(&self.cur_token.text) {
                     self.abort(format!("Referencing variable before assignment: {}", self.cur_token.text).as_str());
                 }
+
+                self.emitter.emit(&self.cur_token.text);
                 self.next_token();
             }
             _ => {
@@ -246,11 +265,11 @@ impl Parser {
     }
 
     pub fn comparison(&mut self) {
-        println!("COMPARISON");
-
         self.expression();
+
         // Must be at least one comparison operator and another expression.
         if self.is_comparison_operator() {
+            self.emitter.emit(&self.cur_token.text);
             self.next_token();
             self.expression();
         } else {
@@ -259,6 +278,7 @@ impl Parser {
 
         // Can have 0 or more comparison operator and expressions.
         while self.is_comparison_operator() {
+            self.emitter.emit(&self.cur_token.text);
             self.next_token();
             self.expression();
         }
