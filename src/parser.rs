@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::{lexer::Lexer, token::{TokenType, Token}};
 
 
@@ -5,6 +7,9 @@ pub struct Parser {
     lexer: Lexer,
     cur_token: Token,
     peek_token: Token,
+    symbols: HashSet<String>,
+    labels_declared: HashSet<String>,
+    labels_gotoed: HashSet<String>,
 }
 
 impl Parser {
@@ -13,6 +18,9 @@ impl Parser {
             lexer,
             cur_token: Token::default(),
             peek_token: Token::default(),
+            symbols: HashSet::new(),
+            labels_declared: HashSet::new(),
+            labels_gotoed: HashSet::new(),
         };
         s.next_token();
         s.next_token();
@@ -82,6 +90,13 @@ impl Parser {
         while !self.check_token(TokenType::Eof) {
             self.statement();
         }
+
+        // Check that each label referenced in a GOTO is declared
+        self.labels_gotoed.iter()
+        .filter(|label| !self.labels_declared.contains(label.as_str()))
+        .for_each(|label| {
+            self.abort(format!("Attempting to GOTO undeclared label: {}", label).as_str());
+        });
     }
 
     /// One of the following statements...
@@ -134,23 +149,43 @@ impl Parser {
             TokenType::Label => {
                 println!("STATEMENT-LABEL");
                 self.next_token();
+                if self.labels_declared.contains(&self.cur_token.text) {
+                    self.abort(format!("Label already exists: {}", self.cur_token.text).as_str());
+                }
+                self.labels_declared.insert(self.cur_token.text.clone());
+
                 self.match_token(TokenType::Ident);
             },
             TokenType::GoTo => {
                 println!("STATEMENT-GOTO");
                 self.next_token();
+                self.labels_gotoed.insert(self.cur_token.text.clone());
                 self.match_token(TokenType::Ident);
             },
             TokenType::Let => {
                 println!("STATEMENT-LET");
                 self.next_token();
+
+                // Check if ident exists in symbol table. If not, declare it.
+                if !self.symbols.contains(&self.cur_token.text) {
+                    self.symbols.insert(self.cur_token.text.clone());
+                }
+
                 self.match_token(TokenType::Ident);
                 self.match_token(TokenType::Eq);
+
                 self.expression();
             },
             TokenType::Input => {
                 println!("STATEMENT-INPUT");
+
                 self.next_token();
+
+                // If variable doesn't already exist, declare it.
+                if !self.symbols.contains(&self.cur_token.text) {
+                    self.symbols.insert(self.cur_token.text.clone());
+                }
+
                 self.match_token(TokenType::Ident);
             },
             _ => {
@@ -196,12 +231,17 @@ impl Parser {
     pub fn primary(&mut self) {
         println!("PRIMARY ({})", self.cur_token.text);
 
-        if self.check_token(TokenType::Number) || self.check_token(TokenType::Ident) {
-            self.next_token();
-        }
-        else {
-            // Error
-            self.abort(format!("Unexpected token at {}", self.cur_token.text).as_str());
+        match self.cur_token.kind {
+            TokenType::Number => self.next_token(),
+            TokenType::Ident => {
+                if !self.symbols.contains(&self.cur_token.text) {
+                    self.abort(format!("Referencing variable before assignment: {}", self.cur_token.text).as_str());
+                }
+                self.next_token();
+            }
+            _ => {
+                self.abort(format!("Unexpected token at {}", self.cur_token.text).as_str());
+            }
         }
     }
 
